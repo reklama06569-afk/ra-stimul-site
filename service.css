@@ -18,3 +18,7 @@
 .card-example-copy h3{font-size:20px;line-height:1.2;margin:0 0 8px;letter-spacing:-.25px}
 .card-example-copy p{font-size:14px;line-height:1.55;color:#5e6a76;margin:0}
 @media(max-width:640px){.card-example-grid{grid-template-columns:1fr;gap:13px}.card-example{border-radius:15px}.card-example-copy{padding:15px 15px 17px}.card-example-copy h3{font-size:18px}.card-example-copy p{font-size:13px;line-height:1.5}.card-detail{margin-bottom:9px}}
+
+/* Signage gallery: show complete original photos without cropping or distortion */
+.signage-gallery .card-example-media{aspect-ratio:4/3;background:#f0f2f4}
+.signage-gallery .card-example-media img{object-fit:contain;background:#f0f2f4}
