@@ -342,3 +342,11 @@ footer{background:#fff;border-top:1px solid var(--line)}
  .footer-inner{grid-template-columns:1fr}
  .footer-brand,.footer-inner>div:last-child{grid-column:auto}
 }
+
+
+/* Homepage portfolio link to the full signage gallery */
+.works-more-wrap{display:flex;justify-content:center;margin-top:26px}
+.works-more-link{display:inline-flex;align-items:center;justify-content:center;gap:12px;min-height:48px;padding:0 21px;border-radius:12px;background:var(--yellow);color:#111820;font-size:14px;font-weight:850;transition:transform .15s,box-shadow .15s}
+.works-more-link span{font-size:20px;line-height:1}
+.works-more-link:hover{transform:translateY(-2px);box-shadow:0 8px 20px rgba(7,21,34,.12)}
+@media(max-width:640px){.works-more-wrap{margin-top:18px}.works-more-link{width:100%;padding:0 14px;font-size:13px}}
