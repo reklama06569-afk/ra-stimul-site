@@ -350,3 +350,14 @@ footer{background:#fff;border-top:1px solid var(--line)}
 .works-more-link span{font-size:20px;line-height:1}
 .works-more-link:hover{transform:translateY(-2px);box-shadow:0 8px 20px rgba(7,21,34,.12)}
 @media(max-width:640px){.works-more-wrap{margin-top:18px}.works-more-link{width:100%;padding:0 14px;font-size:13px}}
+
+
+/* Homepage business advantages */
+.advantages-section{background:#f5f7f9;border-block:1px solid #edf0f2}
+.advantages-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-top:28px}
+.advantage-card{position:relative;min-width:0;padding:22px 19px 24px;border:1px solid #e2e8ed;border-radius:16px;background:#fff;box-shadow:0 5px 18px rgba(7,21,34,.035)}
+.advantage-mark{display:flex;align-items:center;justify-content:center;width:38px;height:38px;margin-bottom:19px;border-radius:12px;background:var(--yellow);color:#111820;font-size:12px;font-weight:900}
+.advantage-card h3{margin:0 0 9px;font-size:17px;line-height:1.25}
+.advantage-card p{margin:0;color:var(--muted);font-size:13px;line-height:1.55}
+@media(max-width:900px){.advantages-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:560px){.advantages-grid{grid-template-columns:1fr;gap:10px;margin-top:20px}.advantage-card{padding:17px;display:grid;grid-template-columns:38px minmax(0,1fr);column-gap:12px;align-items:start}.advantage-mark{grid-row:span 2;margin:0}.advantage-card h3{font-size:15px;margin:2px 0 5px}.advantage-card p{font-size:12px;line-height:1.45}}
