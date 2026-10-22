@@ -19,7 +19,22 @@
 .card-example-copy p{font-size:14px;line-height:1.55;color:#5e6a76;margin:0}
 @media(max-width:640px){.card-example-grid{grid-template-columns:1fr;gap:13px}.card-example{border-radius:15px}.card-example-copy{padding:15px 15px 17px}.card-example-copy h3{font-size:18px}.card-example-copy p{font-size:13px;line-height:1.5}.card-detail{margin-bottom:9px}}
 
-/* Signage gallery: show complete original photos without cropping or distortion */
+
+/* v49 banner examples */
+.section-portfolio{background:#f7f9fb;border-block:1px solid #eef2f5}
+.banner-example-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.banner-example-card{overflow:hidden;border:1px solid #e5eaef;border-radius:18px;background:#fff;box-shadow:0 10px 28px rgba(7,21,34,.05)}
+.banner-example-media{aspect-ratio:16/10;overflow:hidden;background:#eef2f5}
+.banner-example-media img{width:100%;height:100%;object-fit:cover;transition:transform .25s}
+.banner-example-card:hover .banner-example-media img{transform:scale(1.02)}
+.banner-example-copy{padding:18px 19px 20px}
+.banner-detail{display:inline-flex;align-items:center;padding:7px 10px;margin-bottom:11px;border-radius:999px;background:#fff4c2;color:#725700;font-size:11px;font-weight:900;line-height:1.2}
+.banner-example-copy h3{font-size:21px;line-height:1.2;letter-spacing:-.25px;margin:0 0 8px}
+.banner-example-copy p{font-size:14px;line-height:1.58;color:#5e6a76;margin:0}
+.banner-example-copy b{color:#111820}
+@media(max-width:640px){.banner-example-grid{grid-template-columns:1fr;gap:13px}.banner-example-card{border-radius:15px}.banner-example-copy{padding:15px 15px 17px}.banner-example-copy h3{font-size:18px}.banner-example-copy p{font-size:13px;line-height:1.5}.banner-detail{margin-bottom:9px}}
+
+/* Объёмные буквы: единый формат карточек без обрезки исходных фотографий. */
 .signage-gallery .card-example-media{aspect-ratio:4/3;background:#f0f2f4}
 .signage-gallery .card-example-media img{object-fit:contain;background:#f0f2f4}
 
