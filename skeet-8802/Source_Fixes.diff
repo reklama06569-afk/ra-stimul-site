@@ -1,0 +1,229 @@
+--- a/source/lua/bridge.lua
++++ b/source/lua/bridge.lua
+@@ -13,7 +13,19 @@
+  int clover_sky(const char*);
+  int clover_sky_tint(const char*,unsigned int);
+ ]])
+-local native = ffi.load('skeet.dll')
++-- Only this DLL's fixed bridge functions are bound by bootstrap. No ffi.load required.
++local native = {
++ clover_ui_heartbeat=ffi.cast('void(__cdecl*)(void)',tonumber('__CLOVER_UI_HEARTBEAT__',16)),
++ clover_ui_module=ffi.cast('void(__cdecl*)(unsigned int)',tonumber('__CLOVER_UI_MODULE__',16)),
++ clover_night=ffi.cast('void(__cdecl*)(int,unsigned int,unsigned int,unsigned int)',tonumber('__CLOVER_NIGHT__',16)),
++ clover_night_reset=ffi.cast('void(__cdecl*)(void)',tonumber('__CLOVER_NIGHT_RESET__',16)),
++ clover_telemetry=ffi.cast('int(__cdecl*)(void*,unsigned int)',tonumber('__CLOVER_TELEMETRY__',16)),
++ clover_selected_weapon=ffi.cast('int(__cdecl*)(void)',tonumber('__CLOVER_SELECTED_WEAPON__',16)),
++ clover_sticker_set=ffi.cast('int(__cdecl*)(int,unsigned int,int,float,float,float)',tonumber('__CLOVER_STICKER_SET__',16)),
++ clover_sticker_get=ffi.cast('int(__cdecl*)(int,unsigned int,void*)',tonumber('__CLOVER_STICKER_GET__',16)),
++ clover_sky=ffi.cast('int(__cdecl*)(const char*)',tonumber('__CLOVER_SKY__',16)),
++ clover_sky_tint=ffi.cast('int(__cdecl*)(const char*,unsigned int)',tonumber('__CLOVER_SKY_TINT__',16)),
++}
+ client.set_event_callback('paint_ui',function() native.clover_ui_heartbeat() end)
+ local hw = ffi.new('CloverTelemetry8802[1]')
+ local hw_time = -10
+--- a/source/skeet/ui_addon_runtime.h
++++ b/source/skeet/ui_addon_runtime.h
+@@ -6,6 +6,18 @@
+ #include <cmath>
+ #include "sticker_state.h"
+ #include "ui_addon_embedded.h"
++extern "C" {
++__declspec(dllexport) void clover_ui_heartbeat(void);
++__declspec(dllexport) void clover_ui_module(unsigned int);
++__declspec(dllexport) void clover_night(int,unsigned int,unsigned int,unsigned int);
++__declspec(dllexport) void clover_night_reset(void);
++__declspec(dllexport) int clover_telemetry(void*,unsigned int);
++__declspec(dllexport) int clover_selected_weapon(void);
++__declspec(dllexport) int clover_sticker_set(int,unsigned int,int,float,float,float);
++__declspec(dllexport) int clover_sticker_get(int,unsigned int,void*);
++__declspec(dllexport) int clover_sky(const char*);
++__declspec(dllexport) int clover_sky_tint(const char*,unsigned int);
++}
+ namespace ui_addon {
+ inline std::atomic<unsigned> modules{0};
+ inline bool attempted=false,loaded=false;inline unsigned start=0;inline std::atomic<unsigned> heartbeat_at{0},heartbeat_gap{0};
+@@ -49,6 +61,27 @@
+  const float r=float(color&255)/255,g=float((color>>8)&255)/255,b=float((color>>16)&255)/255;
+  for(auto& saved:sky_materials)if(saved.material&&tint_method(saved.material,28))agent_preview::call<void>(saved.material,28,r,g,b);tinted_color=color;return true;
+ }
++// Resolve narrow bridge addresses for this process, including ASLR relocation.
++inline const char* bound_script(){
++ static char script[sizeof(ui_addon_script)];std::memcpy(script,ui_addon_script,sizeof(script));
++ const auto bind=[&](const char* token,std::uintptr_t address){
++  // Preserve template length and avoid allocation during native bootstrap.
++  const auto n=std::strlen(token);char* at=std::strstr(script,token);
++  if(!at)return;
++  std::memset(at,'0',n);for(unsigned i=0;i<8;i++){at[n-1-i]="0123456789abcdef"[address&15];address>>=4;}
++ };
++ bind("__CLOVER_UI_HEARTBEAT__",reinterpret_cast<std::uintptr_t>(&clover_ui_heartbeat));
++ bind("__CLOVER_UI_MODULE__",reinterpret_cast<std::uintptr_t>(&clover_ui_module));
++ bind("__CLOVER_NIGHT__",reinterpret_cast<std::uintptr_t>(&clover_night));
++ bind("__CLOVER_NIGHT_RESET__",reinterpret_cast<std::uintptr_t>(&clover_night_reset));
++ bind("__CLOVER_TELEMETRY__",reinterpret_cast<std::uintptr_t>(&clover_telemetry));
++ bind("__CLOVER_SELECTED_WEAPON__",reinterpret_cast<std::uintptr_t>(&clover_selected_weapon));
++ bind("__CLOVER_STICKER_SET__",reinterpret_cast<std::uintptr_t>(&clover_sticker_set));
++ bind("__CLOVER_STICKER_GET__",reinterpret_cast<std::uintptr_t>(&clover_sticker_get));
++ bind("__CLOVER_SKY__",reinterpret_cast<std::uintptr_t>(&clover_sky));
++ bind("__CLOVER_SKY_TINT__",reinterpret_cast<std::uintptr_t>(&clover_sky_tint));
++ return script;
++}
+ inline void bootstrap(SkeetSDK::CMenu* cs2_bootstrap_menu){if(attempted){
+  const unsigned last=heartbeat_at.load();const unsigned missed=heartbeat_gap.fetch_add(1)+1;
+  if(!loaded||!last||missed<=180||GetTickCount()-last<=5000)return;
+@@ -62,7 +95,7 @@
+  attempted=true;wchar_t path[MAX_PATH]{};const DWORD n=GetCurrentDirectoryW(MAX_PATH,path);if(!n||n>=MAX_PATH-40)return;
+  const wchar_t* filename=L"clover_cs2_ui_8802.lua";std::wcscat(path,L"\\");std::wcscat(path,filename);
+  auto file=CreateFileW(path,GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);if(file==INVALID_HANDLE_VALUE)return;
+- DWORD wrote=0;const DWORD size=sizeof(ui_addon_script)-1;const bool ok=WriteFile(file,ui_addon_script,size,&wrote,nullptr)&&wrote==size;CloseHandle(file);if(!ok)return;
++ const char* script=bound_script();DWORD wrote=0;const DWORD size=sizeof(ui_addon_script)-1;const bool ok=WriteFile(file,script,size,&wrote,nullptr)&&wrote==size;CloseHandle(file);if(!ok)return;
+  // The embedded, reviewed module needs FFI for this DLL's narrow exports.
+  // Scope the native loader permission to this load; preserve the user's flag.
+  bool* unsafe=nullptr;bool was_unsafe=false;auto* menu=cs2_bootstrap_menu;
+--- a/source/skeet/rage_settings_ui.h
++++ b/source/skeet/rage_settings_ui.h
+@@ -65,6 +65,8 @@
+  if(!r||!esp_layout_runtime::supported_renderer(r))return;
+  auto& p=panes[popup+2];if(!p.child||!p.child->Header.Flags.Visible||!p.draw)return;
+  geometry(p);place_gears(p);RendererOverlayScope overlay(r);
++ // Native hotkey/combo menus draw at Z=0.15; keep the containing pane behind them.
++ r->SetZBuff(0.2f);
+  const Vec2 origin=m->Pos;p.draw(p.child,r,&origin);
+  if(p.id==8)r->Text(0,m->Pos.x+p.child->Pos.x+int(15*scale()),m->Pos.y+p.child->Pos.y+p.child->Size.y-int(18*scale()),0xff999999u,p.child->Size.x-int(24*scale()),hitchance_ui::profile_caption,std::wcslen(hitchance_ui::profile_caption));
+ }
+@@ -90,7 +92,7 @@
+  captured=topology(m);busy=false;attached=true;for(int i=0;i<2;i++){sources[i]->Header.Flags.Visible=false;panes[i].child->Header.Flags.Visible=original_visible[i];}for(auto& p:panes)layout(p.child,nullptr);return true;
+ }
+ inline void restore(CMenu* m){for(auto* c:m->Tabs[RAGE]->Childs)for(int i=0;i<2;i++)if(c==sources[i])c->Header.Flags.Visible=original_visible[i];}
+-inline bool native_editor_open(){if(popup<0)return false;for(unsigned i=0;i<used;i++){auto& v=views[i];if(!v.proxy||v.pane->id!=popup+2)continue;auto* h=v.proxy->GetAs<Checkbox>();if(h->Header.Type==UiHotkey){auto* k=v.proxy->GetAs<Hotkey>();if(k->SettingKey||(k->Popup&&k->Popup->Header.Flags.Visible))return true;}if(h->Header.Type==UiCombobox&&*(reinterpret_cast<unsigned char*>(h)+0x70))return true;if(h->Header.Type==UiMultiselect&&v.proxy->GetAs<Multiselect>()->Popup)return true;}return false;}
++inline bool native_editor_open(){if(popup<0)return false;for(unsigned i=0;i<used;i++){auto& v=views[i];if(!v.proxy||v.pane->id!=popup+2)continue;auto* h=v.proxy->GetAs<Checkbox>();if(h->Header.Type==UiHotkey){auto* k=v.proxy->GetAs<Hotkey>();if(k->SettingKey||(k->Popup&&*(reinterpret_cast<const unsigned char*>(k->Popup)+0x64)))return true;}if(h->Header.Type==UiCombobox&&*(reinterpret_cast<unsigned char*>(h)+0x70))return true;if(h->Header.Type==UiMultiselect&&v.proxy->GetAs<Multiselect>()->Popup)return true;}return false;}
+ inline POINT cursor_point(){POINT p{};GetCursorPos(&p);HWND hwnd=ui_preview_input::window.load();if(!hwnd){DWORD pid=0;auto active=GetForegroundWindow();if(active){GetWindowThreadProcessId(active,&pid);if(pid==GetCurrentProcessId())hwnd=active;}}if(hwnd)ScreenToClient(hwnd,&p);return p;}
+ inline void frame(CMenu* m){
+  if(!m||m->Tabs.size()!=9||!m->Tabs[RAGE])return;
+--- a/source/skeet/SkeetSDK/skeetsdk.h
++++ b/source/skeet/SkeetSDK/skeetsdk.h
+@@ -1995,13 +1995,14 @@
+ 
+ 	const wchar_t* ConfigSystem::CurrentConfigName()
+ 	{
+-		if (!*CurrentConfigHash) return nullptr;
++		if (!CurrentConfigHash || !*CurrentConfigHash) return nullptr;
+ 		PListbox ptr = Menu->Tabs[CONFIG]->Childs[0]->Elements[0]->GetAs<Listbox>();
+ 		for (auto& item : ptr->Info.Items)
+ 		{
+ 			if (Hasher::FNV1a(item.Name.data()) == *CurrentConfigHash)
+ 				return item.Name.data();
+ 		}
++		return nullptr;
+ 	};
+ 
+ 	bool ConfigSystem::LoadConfig(const char* name)
+@@ -2339,7 +2340,8 @@
+ 
+ 	wchar_t* UI::GetName(PElement element)
+ 	{
+-		wchar_t name[128];
++		// Valid until the next GetName call on this thread.
++		static thread_local wchar_t name[128];
+ 		Utils::Decrypt(element->GetAs<Slider>()->Name.get(), 2, name, 128);
+ 		return name;
+ 	};
+--- a/tests/addon_bootstrap_fixture.py
++++ b/tests/addon_bootstrap_fixture.py
+@@ -9,7 +9,10 @@
+   assert wide(u,word(u,sp+4))=='C:\\CS\\clover_cs2_ui_8802.lua';return 123,32
+  def write(u,sp):
+   handle,ptr,n,out=[word(u,sp+i) for i in [4,8,12,16]];assert handle==123
+-  payload=bytes(u.mem_read(ptr,n));assert payload==(ROOT/'source/lua/clover_cs2_ui_8802.lua').read_bytes();writes.append(n);store(u,out,n);return 1,24
++  payload=bytes(u.mem_read(ptr,n));expected=(ROOT/'source/lua/clover_cs2_ui_8802.lua').read_text()
++  import re
++  for token in re.findall(r'__CLOVER_[A-Z_]+__',expected):expected=expected.replace(token,format(exp(token[2:-2].lower()),'x').rjust(len(token),'0'))
++  assert payload==expected.encode();writes.append(n);store(u,out,n);return 1,24
+  handlers={'GetTickCount':lambda u,sp:(ticks[0],4),'GetCurrentDirectoryW':current_directory,'CreateFileW':create,'WriteFile':write,'CloseHandle':lambda u,sp:(1,8),'wcscat':lambda u,sp:(append_wide(u,word(u,sp+4),word(u,sp+8)),4)}
+  def append_wide(u,out,src):
+   left,right=wide(u,out),wide(u,src);u.mem_write(out,(left+right+'\0').encode('utf-16le'));return out
+--- a/tests/lua_ui_fixture.lua
++++ b/tests/lua_ui_fixture.lua
+@@ -1,3 +1,4 @@
++bridge_addresses={}
+ -- Restricted GameSense API fixture. No game, OS FFI, filesystem or network calls.
+ now=0;chosen_weapon=9;controls={};events={};draws={};errors={};skies={};db={};stickers={}
+ local function control(kind,tab,group,name,...)
+@@ -56,10 +57,10 @@
+ local ffi={}
+ function ffi.cdef() end
+ function ffi.new(typename) return {[0]={id=0,wear=0,scale=1,rotation=0,valid=0}} end
+-function ffi.load(name) assert(name=='skeet.dll');return native end
++-- ffi.load is unavailable in the game sandbox.
+ function ffi.sizeof() return 28 end
+ function ffi.typeof(t) return t end
+-function ffi.cast(t,v) return v end
++function ffi.cast(t,v) if type(v)=='number' and bridge_addresses[v] then return native[bridge_addresses[v]] end;return v end
+ function ffi.string(x) return x end
+ package.preload.ffi=function() return ffi end
+ renderer={}
+--- a/tests/validate_lua_ui.py
++++ b/tests/validate_lua_ui.py
+@@ -7,6 +7,9 @@
+ lua.execute((ROOT/'tests/lua_ui_fixture.lua').read_text())
+ lua.globals().fixture_skin_group='Knife options'
+ source=(ROOT/'source/lua/clover_cs2_ui_8802.lua').read_text()
++import re
++for i,name in enumerate(re.findall(r'__CLOVER_[A-Z_]+__',source),1):
++    address=0x1000+i*16;lua.globals().bridge_addresses[address]=name[2:-2].lower();source=source.replace(name,format(address,'x'))
+ # Exercise LuaJIT's real filename/module search. The previous native boundary
+ # stub accepted the wrong .lua suffix and therefore hid this exact failure.
+ folder=tempfile.TemporaryDirectory(prefix='clover-lua-resolution-')
+--- a/tests/validate_visuals.py
++++ b/tests/validate_visuals.py
+@@ -39,7 +39,7 @@
+         cleanup=4
+         if fn in ['memcpy','memmove']:
+             dst,src,n=[word(u,sp+i) for i in [4,8,12]];u.mem_write(dst,bytes(u.mem_read(src,n)));result=dst
+-        elif fn in ['strcpy','strcmp','strlen']:
++        elif fn in ['strcpy','strcmp','strlen','strstr']:
+             def cstring(ptr):
+                 out=bytearray()
+                 while bytes(u.mem_read(ptr+len(out),1))!=b'\0':out.extend(u.mem_read(ptr+len(out),1))
+@@ -48,7 +48,9 @@
+             if fn=='strlen':result=len(cstring(dst))
+             else:
+                 src=word(u,sp+8)
+-                if fn=='strcpy':u.mem_write(dst,cstring(src)+b'\0');result=dst
++                if fn=='strstr':
++                    left,right=cstring(dst),cstring(src);result=dst+left.index(right) if right in left else 0
++                elif fn=='strcpy':u.mem_write(dst,cstring(src)+b'\0');result=dst
+                 else:left,right=cstring(dst),cstring(src);result=(left>right)-(left<right)
+         elif fn=='memset':
+             dst,value,n=[word(u,sp+i) for i in [4,8,12]];u.mem_write(dst,bytes([value&255])*n);result=dst
+--- a/tests/rage_ui_fixture.py
++++ b/tests/rage_ui_fixture.py
+@@ -51,7 +51,9 @@
+    ret=word(u,sp)
+    # Native draw takes renderer and origin; layout/reset functions have no args.
+    if word(u,sp+4)==r:
+-    rendered.append(this);cleanup=12
++    rendered.append(this);
++    if this in panes[2:]:assert abs(scalar(u,r+0x7c)-.2)<1e-6
++    cleanup=12
+   else:assert a in [api_base+0x120,api_base+0x440],hex(a)
+   u.reg_write(UC_X86_REG_EAX,result);u.reg_write(UC_X86_REG_ESP,sp+cleanup);u.reg_write(UC_X86_REG_EIP,word(u,sp))
+  def packets(u,a,size,user):
+@@ -70,6 +72,12 @@
+   proxy=call(u,exp('rage_proxy_for_source_probe'),[source[i]]);assert word(u,proxy+0x10)==panes[pane];assert rows[i][2]==8 or word(u,proxy+0x5c)==values[i][0]
+  assert [(word(u,p+0x84)-word(u,p+0x80))//4 for p in panes]==[9,6,2,2,2,4,2,6 if damage_kind==9 else 4,4]
+  call(u,exp('rage_open_probe'),[3]);key_proxy=call(u,exp('rage_proxy_for_source_probe'),[source[6]]);u.mem_write(key_proxy+0x60,b'\1');assert call(u,exp('rage_native_editor_probe'))==1;u.mem_write(key_proxy+0x60,b'\0');assert call(u,exp('rage_native_editor_probe'))==0;call(u,exp('rage_close_probe'))
++ # Native mode popup uses its private open byte at +0x64, not Header.Visible.
++ call(u,exp('rage_open_probe'),[3]);mode_popup=alloc(0x90);store(u,key_proxy+0x6c,mode_popup)
++ u.mem_write(mode_popup+0x15,b'\0');u.mem_write(mode_popup+0x64,b'\1')
++ assert call(u,exp('rage_native_editor_probe'))==1
++ u.mem_write(mode_popup+0x64,b'\0');assert call(u,exp('rage_native_editor_probe'))==0
++ store(u,key_proxy+0x6c,0);call(u,exp('rage_close_probe'))
+  # Actual frame polling must intercept row-overlapping gears before native
+  # checkbox input and publish the popup in that same frame, even while held.
+  store(u,menu+0x34,1);store(u,menu+0x64,0)
+@@ -105,4 +113,4 @@
+  # Ownership changed before queued callback: do not forward through retired source.
+  callbacks.clear();store(u,other+0x84,word(u,other+0x84)-4);call(u,exp('rage_change_probe'),[call(u,exp('rage_index_probe'),[source[11]])]);assert not callbacks
+  assert word(u,call(u,exp('rage_proxy_for_source_probe'),[source[11]])+0x5c)==0
+- return {'popup_not_submitted_in_ordinary_child_pass':True,'popup_submitted_after_both_main_panels':True,'overlay_restores_renderer_state':True,'real_gear_frame_click_does_not_toggle_peek':True,'opening_click_suppressed_until_release':True,'popup_visible_same_frame':True,'popup_occludes_main_gears':True,'native_rage_views':len(rows),'gear_groups':7,'override_binds_in_popup':True,'blank_companions_routed':True,'source_models_preserved':True,'native_callbacks_forwarded_once':True,'retired_callback_invalidated':True,'popup_close_checked':True,'native_key_capture_keeps_parent_popup':True}
++ return {'popup_not_submitted_in_ordinary_child_pass':True,'popup_submitted_after_both_main_panels':True,'overlay_restores_renderer_state':True,'real_gear_frame_click_does_not_toggle_peek':True,'opening_click_suppressed_until_release':True,'popup_visible_same_frame':True,'popup_occludes_main_gears':True,'native_rage_views':len(rows),'gear_groups':7,'override_binds_in_popup':True,'blank_companions_routed':True,'source_models_preserved':True,'native_callbacks_forwarded_once':True,'retired_callback_invalidated':True,'popup_close_checked':True,'native_key_capture_keeps_parent_popup':True,'native_mode_open_byte_verified':True,'parent_depth_behind_native_mode_menu':True}
