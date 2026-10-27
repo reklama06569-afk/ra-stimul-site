@@ -1,0 +1,705 @@
+--- a/source/lua/bridge.lua
++++ b/source/lua/bridge.lua
+@@ -1,36 +1,56 @@
+-local ffi = require('ffi')
+-pcall(ffi.cdef,[[
+- typedef struct { unsigned int size,valid; float cpu_percent,cpu_ghz,ram_used_gib,ram_total_gib,process_mib; } CloverTelemetry8802;
+- typedef struct { int id; float wear,scale,rotation; } CloverSticker8802;
+- void clover_ui_heartbeat(void);
+- void clover_ui_module(unsigned int);
+- void clover_night(int,unsigned int,unsigned int,unsigned int);
+- void clover_night_reset(void);
+- int clover_telemetry(void*,unsigned int);
+- int clover_selected_weapon(void);
+- int clover_sticker_set(int,unsigned int,int,float,float,float);
+- int clover_sticker_get(int,unsigned int,void*);
+- int clover_sky(const char*);
+- int clover_sky_tint(const char*,unsigned int);
+-]])
+--- Only this DLL's fixed bridge functions are bound by bootstrap. No ffi.load required.
+-local native = {
+- clover_ui_heartbeat=ffi.cast('void(__cdecl*)(void)',tonumber('__CLOVER_UI_HEARTBEAT__',16)),
+- clover_ui_module=ffi.cast('void(__cdecl*)(unsigned int)',tonumber('__CLOVER_UI_MODULE__',16)),
+- clover_night=ffi.cast('void(__cdecl*)(int,unsigned int,unsigned int,unsigned int)',tonumber('__CLOVER_NIGHT__',16)),
+- clover_night_reset=ffi.cast('void(__cdecl*)(void)',tonumber('__CLOVER_NIGHT_RESET__',16)),
+- clover_telemetry=ffi.cast('int(__cdecl*)(void*,unsigned int)',tonumber('__CLOVER_TELEMETRY__',16)),
+- clover_selected_weapon=ffi.cast('int(__cdecl*)(void)',tonumber('__CLOVER_SELECTED_WEAPON__',16)),
+- clover_sticker_set=ffi.cast('int(__cdecl*)(int,unsigned int,int,float,float,float)',tonumber('__CLOVER_STICKER_SET__',16)),
+- clover_sticker_get=ffi.cast('int(__cdecl*)(int,unsigned int,void*)',tonumber('__CLOVER_STICKER_GET__',16)),
+- clover_sky=ffi.cast('int(__cdecl*)(const char*)',tonumber('__CLOVER_SKY__',16)),
+- clover_sky_tint=ffi.cast('int(__cdecl*)(const char*,unsigned int)',tonumber('__CLOVER_SKY_TINT__',16)),
+-}
+-client.set_event_callback('paint_ui',function() native.clover_ui_heartbeat() end)
+-local hw = ffi.new('CloverTelemetry8802[1]')
+-local hw_time = -10
++-- Private DLL operations use native UI callbacks. No FFI function calls.
++local input,output={},{}
++local function hidden(method,name,...)
++ local ref=native_ui[method]('LUA','A',name,...);native_ui.set_visible(ref,false);return ref
++end
++local request=hidden('new_checkbox','Clover bridge request 8802')
++local ready=hidden('new_slider','Clover bridge ready 8802',0,10000,0,false)
++for i=0,31 do input[i]=hidden('new_slider','Clover bridge in '..i,-1000000000,1000000000,0,false) end
++for i=0,7 do output[i]=hidden('new_slider','Clover bridge out '..i,-1000000000,1000000000,0,false) end
++local sequence,bridge_failed=0,false
++local function rpc(op,args,text)
++ if bridge_failed or native_ui.get(ready)~=8802 then return 0 end
++ sequence=sequence%1000000+1
++ for i=1,6 do native_ui.set(input[i],args and args[i] or 0) end
++ if op==9 or op==10 then
++  text=text or '';if #text>95 then return 0 end
++  for n=0,23 do
++   local value=0;for j=1,4 do local c=text:byte(n*4+j) or 0;if c>127 then return 0 end;value=value+c*128^(j-1) end
++   if value>2147483647 then return 0 end
++   native_ui.set(input[7+n],value)
++  end
++ end
++ native_ui.set(input[0],op);native_ui.set(input[31],sequence)
++ native_ui.set(request,not native_ui.get(request))
++ if native_ui.get(output[7])~=sequence then
++  bridge_failed=true;client.error_log('Clover: native UI bridge unavailable; module startup stopped');return 0
++ end
++ return native_ui.get(output[0])
++end
++local function fixed(v) return math.floor(v*10000+.5) end
++-- Data containers only; engine calls never pass through this adapter.
++local ffi={new=function() return {[0]={id=0,wear=0,scale=1,rotation=0,valid=0}} end,sizeof=function() return 28 end}
++local native={}
++function native.clover_ui_heartbeat() return rpc(1) end
++function native.clover_ui_module(mask) return rpc(2,{mask}) end
++function native.clover_night(on,amount,world,props) return rpc(3,{on,amount,world,props}) end
++function native.clover_night_reset() return rpc(4) end
++function native.clover_telemetry(out)
++ local ok=rpc(5);if ok==1 then out[0]={valid=native_ui.get(output[1]),cpu_percent=native_ui.get(output[2])/10000,cpu_ghz=native_ui.get(output[3])/10000,ram_used_gib=native_ui.get(output[4])/10000,ram_total_gib=native_ui.get(output[5])/10000,process_mib=native_ui.get(output[6])/10000} end;return ok
++end
++function native.clover_selected_weapon() return rpc(6) end
++function native.clover_sticker_set(w,s,id,wear,scale,rotation) return rpc(7,{w,s,id,fixed(wear),fixed(scale),fixed(rotation)}) end
++function native.clover_sticker_get(w,s,out)
++ local ok=rpc(8,{w,s});if ok==1 then out[0]={id=native_ui.get(output[1]),wear=native_ui.get(output[2])/10000,scale=native_ui.get(output[3])/10000,rotation=native_ui.get(output[4])/10000} end;return ok
++end
++function native.clover_sky(name) return rpc(9,nil,name) end
++function native.clover_sky_tint(name,color) return rpc(10,{color},name) end
++local last_heartbeat=-10
++client.set_event_callback('paint_ui',function()
++ local now=globals.realtime();if now-last_heartbeat>=.5 then last_heartbeat=now;native.clover_ui_heartbeat() end
++end)
++local hw,hw_time={[0]={valid=0}},-10
+ local function hardware()
+- local now=globals.realtime()
+- if now-hw_time>=1 then hw_time=now;native.clover_telemetry(hw,ffi.sizeof(hw[0])) end
+- return hw[0]
++ local now=globals.realtime();if now-hw_time>=1 then hw_time=now;native.clover_telemetry(hw) end;return hw[0]
+ end
++local function bridge_ready() return native_ui.get(ready)==8802 and rpc(0)==8802 end
+--- a/source/skeet/cs2_visuals_impl.h
++++ b/source/skeet/cs2_visuals_impl.h
+@@ -36,6 +36,8 @@
+ static NativeDraw original_draw=nullptr;
+ static SkeetClass_* context=nullptr;
+ static ChildCtor child_ctor=nullptr;
++using NativeTextCtor=void*(__thiscall*)(void*,void*);
++static NativeTextCtor native_text_ctor=nullptr;
+ static AppendChild append_child=nullptr;
+ static AddButton add_button=nullptr;
+ static Hide hide=nullptr;
+@@ -54,7 +56,7 @@
+ }
+ static Child* originals[32]{};static unsigned original_count=0;
+ static Button* buttons[category_count]{};
+-struct Binding {PElement proxy=nullptr,source=nullptr;Group* group=nullptr;unsigned char observed[8]{};int order=1000;wchar_t name[128]{},anchor[128]{};};
++struct Binding {PElement proxy=nullptr,source=nullptr;Group* group=nullptr;unsigned char observed[8]{},text[132]{};int order=1000;wchar_t name[128]{},anchor[128]{};};
+ static Binding bindings[512]{};static unsigned binding_count=0;
+ static Binding* pending=nullptr;
+ static native_layout_state::Epoch geometry_epoch{};
+@@ -208,13 +210,29 @@
+ }
+ static unsigned model(Binding& b,unsigned char* out) {
+     const auto* s=b.source->GetAs<Checkbox>();const int type=s->Header.Type;
+-    if(type==UiButton)return 0;
++    if(type==UiButton||type==UiTextbox)return 0;
+     void* value=native_ui_proxy::pointer(s,0x5c);
+     if(type==UiLabel||!value)return 0;
+     const unsigned n=type==UiHotkey?8:(type==UiCheckbox?1:4);
+     auto* p=static_cast<unsigned char*>(value)+(type==UiHotkey?16:0);std::memcpy(out,p,n);
+     if(type==UiHotkey) {std::uint32_t key;std::memcpy(&key,out,4);key&=~3U;std::memcpy(out,&key,4);}
+     return n;
++}
++// Inline textbox storage cannot be treated as a shared Value pointer.
++// Poll both objects under native text locks; config/source edits take precedence.
++static bool sync_text(Binding& b){
++ auto* source=b.source->GetAs<Textbox>();auto* view=b.proxy->GetAs<Textbox>();
++ auto* sl=reinterpret_cast<volatile LONG*>(reinterpret_cast<char*>(source)+0x60);
++ auto* vl=reinterpret_cast<volatile LONG*>(reinterpret_cast<char*>(view)+0x60);
++ if(InterlockedCompareExchange(sl,1,0)!=0)return false;
++ if(InterlockedCompareExchange(vl,1,0)!=0){InterlockedExchange(sl,0);return false;}
++ bool edited=false;
++ if(source->Length>=0&&source->Length<64&&view->Length>=0&&view->Length<64){
++  auto* sp=reinterpret_cast<char*>(source)+0x64;auto* vp=reinterpret_cast<char*>(view)+0x64;
++  if(std::memcmp(sp,b.text,132)){std::memcpy(vp,sp,132);std::memcpy(b.text,sp,132);}
++  else if(std::memcmp(vp,b.text,132)){std::memcpy(sp,vp,132);std::memcpy(b.text,vp,132);edited=true;}
++ }
++ InterlockedExchange(vl,0);InterlockedExchange(sl,0);return edited;
+ }
+ static void sync() {
+     if(refreshing||!attached)return;refreshing=true;
+@@ -225,6 +243,10 @@
+         const bool show=s->Header.Flags.Visible&&!(b.group->panel==EnemyESP&&preview_managed(b.anchor));
+         if(p->Header.Flags.Visible!=show) {visible(p,show);dirty[b.group-groups]=true;}
+         p->Header.Flags.Editable=s->Header.Flags.Editable;p->Header.Flags.AllowMouseInput=s->Header.Flags.AllowMouseInput;
++        if(s->Header.Type==UiTextbox){
++            if(sync_text(b)){s->OnValueSet();if(captured_topology&&topology()!=captured_topology){refreshing=false;invalidate();return;}}
++            continue;
++        }
+         unsigned char now[8]{};const auto n=model(b,now);
+         if(n&&std::memcmp(now,b.observed,n)) {
+             std::memcpy(b.observed,now,n);
+@@ -246,7 +268,8 @@
+     if(refreshing||!attached)return;
+     if(captured_topology&&topology()!=captured_topology){invalidate();return;}
+     auto* b=static_cast<Binding*>(ctx);if(!b||!b->source)return;
+-    if(b->source->GetAs<Checkbox>()->Header.Type!=UiButton)b->source->GetAs<Checkbox>()->OnConfigLoad();
++    if(b->source->GetAs<Checkbox>()->Header.Type==UiTextbox)sync_text(*b);
++    else if(b->source->GetAs<Checkbox>()->Header.Type!=UiButton)b->source->GetAs<Checkbox>()->OnConfigLoad();
+     if(captured_topology&&topology()!=captured_topology){invalidate();return;}
+     b->source->GetAs<Checkbox>()->OnValueSet();
+     if(captured_topology&&topology()!=captured_topology){invalidate();return;}
+@@ -297,6 +320,16 @@
+             auto* out=static_cast<Button*>(made);auto* from=source->GetAs<Button>();
+             out->Header.Flags=from->Header.Flags;out->Header.Font=from->Header.Font;out->LeftPaddign=from->LeftPaddign;
+         }
++    } else if(source->GetAs<Checkbox>()->Header.Type==UiTextbox){
++        if(!native_text_ctor){pending=nullptr;return false;}
++        auto* view=static_cast<Textbox*>(native.allocate(sizeof(Textbox)));if(!view){pending=nullptr;return false;}
++        native_text_ctor(view,target.child);auto* from=source->GetAs<Textbox>();
++        view->Header.Flags=from->Header.Flags;view->Header.Font=from->Header.Font;view->LeftPaddign=from->LeftPaddign;
++        if(from->Length<0||from->Length>=64){destroy(view);pending=nullptr;return false;}
++        std::memcpy(reinterpret_cast<char*>(view)+0x64,reinterpret_cast<char*>(from)+0x64,132);
++        std::memcpy(b.text,reinterpret_cast<char*>(from)+0x64,132);
++        b.proxy=reinterpret_cast<PElement>(view);view->Calls.emplace_back(&b,&changed);
++        native.insert(target.child,false,view);made=view;
+     } else made=native_ui_proxy::create(native,target.child,source,caption(name));
+     pending=nullptr;
+     if(!made)return false;
+@@ -320,7 +353,7 @@
+             const Mask mask=companion?previous:((!misc&&helper_available&&helper_control(name))?bit(HelperSettings):route(group_name,name,misc));
+             if(!companion){previous=mask;std::wcscpy(anchor,name);}
+             if(!mask)continue;
+-            if(item->Header.Type!=UiButton&&!native_ui_proxy::supported(item->Header.Type))return false;
++            if(item->Header.Type!=UiButton&&item->Header.Type!=UiTextbox&&!native_ui_proxy::supported(item->Header.Type))return false;
+             for(int panel=0;panel<panel_count;panel++)if(mask&bit(panel))
+                 if(!make_binding(groups[panel],element,name,anchor))return false;
+         }
+@@ -415,7 +448,7 @@
+  if(context&&context->Menu&&context->Menu->Tabs.size()==9&&context->Menu->Tabs[SKINS]==tab)try{skin_mirror_ui::capture(context->Menu);}catch(...){inventory_ui::report("Config synchronization unavailable");}
+ }
+ static void __fastcall frame(CMenu* menu,void*,void* argument) {
+-    if(ready(menu)){ui_addon::bootstrap(menu);night_mode_client::frame();}
++    if(ready(menu)){ui_addon::bootstrap(menu);ui_addon::mailbox::frame(menu);night_mode_client::frame();}
+     enemy_preview::prepare(menu,static_cast<IRenderer*>(argument),false);preview_reserved=enemy_preview::shown?enemy_preview::plan.reserved:0;
+     const int geometry_change=ready(menu)?geometry_epoch.change(menu->Size.x,menu->Size.y,scale()):0;
+     if(attached&&captured_topology&&topology()!=captured_topology)invalidate();
+@@ -458,13 +491,12 @@
+     if(ready(menu)){skin_mirror_ui::frame(menu);weapon_sticker_client::apply(inventory_ui::inventory);}
+     if(ready(menu))crouch_ui::frame(menu);
+     if(ready(menu))hitchance_ui::frame(menu);
+-    if(ready(menu)){rage_settings::frame(menu);esp_layout_runtime::install(context->IRenderer);esp_layout_runtime::draw_hits();}
++    if(ready(menu)){esp_layout_runtime::install(context->IRenderer);esp_layout_runtime::draw_hits();}
+     struct MenuPass {MenuPass(){esp_layout_runtime::menu_drawing=true;}~MenuPass(){esp_layout_runtime::menu_drawing=false;}} menu_pass;
+     original_draw(menu,argument);
+     if(ready(menu)&&(menu->MenuStatus&MenuOpened)){
+         const unsigned now=GetTickCount();tab_transition.observe(menu->CurrentTab,menu->CurrentTab==VISUALS?active:-1,now);
+         const float cover=tab_transition.cover(now);if(cover>0&&esp_layout_runtime::supported_renderer(context->IRenderer)){auto* r=context->IRenderer;RendererOverlayScope overlay(r);const int left=int(88*scale());r->Rect(menu->Pos.x+left,menu->Pos.y+8,menu->Size.x-left-8,menu->Size.y-16,menu_interaction::opacity(0xff111111u,cover));}
+-        rage_settings::paint_overlay(menu,static_cast<IRenderer*>(argument));
+         const unsigned needed=menu->CurrentTab==SKINS?2u:(menu->CurrentTab==VISUALS&&active==World?1u:0u);
+         if(needed&&ui_addon::attempted&&!(ui_addon::modules.load()&needed)&&esp_layout_runtime::supported_renderer(context->IRenderer)){
+             auto* r=context->IRenderer;RendererOverlayScope overlay(r);const wchar_t* message=ui_addon::loaded?L"Additional controls failed to initialize. See console.":L"Additional controls failed to load. See console.";
+@@ -501,7 +533,7 @@
+        !resolve(native.check,image,size,check)||!resolve(native.slider,image,size,slider)||!resolve(native.combo,image,size,combo)||
+        !resolve(native.multi,image,size,multi)||!resolve(native.picker,image,size,picker)||!resolve(native.hotkey,image,size,hotkey)||
+        !resolve(native.label,image,size,label)||!resolve(native.insert,image,size,insert)||!resolve(hide,image,size,hide_pattern)||
+-       !resolve(skin::list_ctor,image,size,list_pattern)||!resolve(skin::text_ctor,image,size,text_pattern))return false;
++       !resolve(skin::list_ctor,image,size,list_pattern)||!resolve(skin::text_ctor,image,size,text_pattern)||!resolve(native_text_ctor,image,size,text_pattern))return false;
+     Memory::Allocator=native.allocate;native.destroy=&destroy;native.copy=&copy;native.link=&link;
+     const auto found=overlay_patch::find(image,size,context_pattern);if(found.count!=1)return false;
+     std::uint32_t address=0;std::memcpy(&address,image+found.offset+1,4);
+--- a/source/skeet/skin_menu_impl.h
++++ b/source/skeet/skin_menu_impl.h
+@@ -119,6 +119,22 @@
+         const bool show_source=from->Header.Flags.Visible;
+         if(out->Header.Flags.Visible!=show_source){visible(out,show_source);dirty[v.pane->index]=true;}
+         out->Header.Flags.Editable=from->Header.Flags.Editable;out->Header.Flags.AllowMouseInput=from->Header.Flags.AllowMouseInput;
++        if(v.type==UiTextbox){
++            auto* src=v.source->GetAs<Textbox>();auto* dst=v.proxy->GetAs<Textbox>();
++            auto* sl=reinterpret_cast<volatile LONG*>(reinterpret_cast<char*>(src)+0x60);auto* dl=reinterpret_cast<volatile LONG*>(reinterpret_cast<char*>(dst)+0x60);
++            bool edited=false;
++            if(InterlockedCompareExchange(sl,1,0)==0){
++                if(InterlockedCompareExchange(dl,1,0)==0){
++                    if(src->Length>=0&&src->Length<64&&dst->Length>=0&&dst->Length<64){
++                        auto* sp=reinterpret_cast<char*>(src)+0x64;auto* dp=reinterpret_cast<char*>(dst)+0x64;
++                        if(!std::memcmp(sp,v.observed,132)&&std::memcmp(dp,v.observed,132)){std::memcpy(sp,dp,132);edited=true;}
++                    }
++                    InterlockedExchange(dl,0);
++                }
++                InterlockedExchange(sl,0);
++            }
++            if(edited){from->OnValueSet();if(fingerprint(menu)!=captured){refreshing=false;invalidate(menu);return;}}
++        }
+         unsigned char current[132]{};const unsigned n=snapshot(v,current);
+         if(n&&std::memcmp(current,v.observed,n)) {
+             if(v.type==UiTextbox)std::memcpy(reinterpret_cast<char*>(v.proxy)+0x64,current,n);
+--- /dev/null
++++ b/source/skeet/ui_addon_mailbox.h
+@@ -0,0 +1,57 @@
++#pragma once
++// Native UI models provide a synchronous, bounded bridge; Lua calls no C pointers.
++namespace ui_addon::mailbox {
++using namespace SkeetSDK;
++inline Checkbox* request=nullptr;inline Slider* ready=nullptr;
++inline Slider* inputs[32]{};inline Slider* outputs[8]{};
++inline std::uint64_t revision=0;inline bool bound=false,busy=false;
++inline int read(unsigned i){return i<32&&inputs[i]&&inputs[i]->Value?*inputs[i]->Value:0;}
++inline void put(unsigned i,int value){if(i<8&&outputs[i]&&outputs[i]->Value)*outputs[i]->Value=value;}
++inline int fixed(float value){if(!std::isfinite(value))return 0;return int(std::clamp(std::round(double(value)*10000.),-2147483647.,2147483647.));}
++inline void __fastcall dispatch(void*,void*){
++ if(!bound||busy)return;
++ busy=true;for(unsigned i=0;i<7;i++)put(i,0);
++ const auto sky_name=[](char (&text)[97]){for(unsigned n=0;n<24;n++){const auto v=static_cast<unsigned>(read(7+n));for(unsigned j=0;j<4;j++)text[n*4+j]=char((v>>(7*j))&127);}text[96]=0;};
++ int result=1;
++ switch(read(0)){
++ case 0:result=8802;break;
++ case 1:clover_ui_heartbeat();break;
++ case 2:clover_ui_module(unsigned(read(1)));break;
++ case 3:clover_night(read(1),unsigned(read(2)),unsigned(read(3)),unsigned(read(4)));break;
++ case 4:clover_night_reset();break;
++ case 5:{Telemetry t{};result=clover_telemetry(&t,sizeof(t));put(1,t.valid);put(2,fixed(t.cpu_percent));put(3,fixed(t.cpu_ghz));put(4,fixed(t.ram_used_gib));put(5,fixed(t.ram_total_gib));put(6,fixed(t.process_mib));break;}
++ case 6:result=clover_selected_weapon();break;
++ case 7:result=clover_sticker_set(read(1),unsigned(read(2)),read(3),read(4)/10000.f,read(5)/10000.f,read(6)/10000.f);break;
++ case 8:{sticker_state::Sticker s{};result=clover_sticker_get(read(1),unsigned(read(2)),&s);put(1,s.id);put(2,fixed(s.wear));put(3,fixed(s.scale));put(4,fixed(s.rotation));break;}
++ case 9:{char name[97]{};sky_name(name);result=clover_sky(name);break;}
++ case 10:{char name[97]{};sky_name(name);result=clover_sky_tint(name[0]?name:nullptr,unsigned(read(1)));break;}
++ default:result=0;break;
++ }
++ put(0,result);put(7,read(31));busy=false;
++}
++inline void frame(CMenu* menu){
++ if(!menu||menu->Tabs.size()!=9)return;
++ std::uint64_t hash=1469598103934665603ull;
++ for(auto* tab:menu->Tabs)if(tab)for(auto* child:tab->Childs)if(child)for(auto* e:child->Elements)hash=(hash^reinterpret_cast<std::uintptr_t>(e))*1099511628211ull;
++ if(hash==revision&&bound){bool linked=false;for(auto& c:request->Calls)if(c.ecx==nullptr&&c.function==&dispatch)linked=true;if(linked){if(ready&&ready->Value)*ready->Value=8802;return;}}
++ revision=hash;bound=false;request=nullptr;ready=nullptr;for(auto& p:inputs)p=nullptr;for(auto& p:outputs)p=nullptr;
++ for(auto* tab:menu->Tabs)if(tab)for(auto* child:tab->Childs)if(child)for(auto* e:child->Elements){
++  if(!e)continue;
++  auto* c=e->GetAs<Checkbox>();if(c->Header.Type!=UiCheckbox&&c->Header.Type!=UiSlider)continue;
++  wchar_t name[128]{};native_ui_names::decode(c->Name.get(),name,128);
++  if(!std::wcscmp(name,L"Clover bridge request 8802")&&c->Header.Type==UiCheckbox)request=c;
++  else if(c->Header.Type==UiSlider){auto* s=e->GetAs<Slider>();
++   if(!std::wcscmp(name,L"Clover bridge ready 8802"))ready=s;
++   const auto index=[](const wchar_t* p,unsigned limit){if(!*p)return limit;unsigned value=0;for(;*p;++p){if(*p<L'0'||*p>L'9')return limit;value=value*10+unsigned(*p-L'0');if(value>=limit)return limit;}return value;};
++   if(!std::memcmp(name,L"Clover bridge in ",17*sizeof(wchar_t))){const auto i=index(name+17,32);if(i<32)inputs[i]=s;}
++   if(!std::memcmp(name,L"Clover bridge out ",18*sizeof(wchar_t))){const auto i=index(name+18,8);if(i<8)outputs[i]=s;}
++  }
++ }
++ if(!request||!request->Value||!ready||!ready->Value)return;
++ for(auto* s:inputs)if(!s||!s->Value)return;
++ for(auto* s:outputs)if(!s||!s->Value)return;
++ bool linked=false;for(auto& call:request->Calls)if(call.ecx==nullptr&&call.function==&dispatch)linked=true;
++ if(!linked)request->Calls.emplace_back(nullptr,&dispatch);
++ bound=true;*ready->Value=8802;
++}
++}
+--- a/source/skeet/ui_addon_runtime.h
++++ b/source/skeet/ui_addon_runtime.h
+@@ -61,34 +61,10 @@
+  const float r=float(color&255)/255,g=float((color>>8)&255)/255,b=float((color>>16)&255)/255;
+  for(auto& saved:sky_materials)if(saved.material&&tint_method(saved.material,28))agent_preview::call<void>(saved.material,28,r,g,b);tinted_color=color;return true;
+ }
+-// Resolve narrow bridge addresses for this process, including ASLR relocation.
+-inline const char* bound_script(){
+- static char script[sizeof(ui_addon_script)];std::memcpy(script,ui_addon_script,sizeof(script));
+- const auto bind=[&](const char* token,std::uintptr_t address){
+-  // Preserve template length and avoid allocation during native bootstrap.
+-  const auto n=std::strlen(token);char* at=std::strstr(script,token);
+-  if(!at)return;
+-  std::memset(at,'0',n);for(unsigned i=0;i<8;i++){at[n-1-i]="0123456789abcdef"[address&15];address>>=4;}
+- };
+- bind("__CLOVER_UI_HEARTBEAT__",reinterpret_cast<std::uintptr_t>(&clover_ui_heartbeat));
+- bind("__CLOVER_UI_MODULE__",reinterpret_cast<std::uintptr_t>(&clover_ui_module));
+- bind("__CLOVER_NIGHT__",reinterpret_cast<std::uintptr_t>(&clover_night));
+- bind("__CLOVER_NIGHT_RESET__",reinterpret_cast<std::uintptr_t>(&clover_night_reset));
+- bind("__CLOVER_TELEMETRY__",reinterpret_cast<std::uintptr_t>(&clover_telemetry));
+- bind("__CLOVER_SELECTED_WEAPON__",reinterpret_cast<std::uintptr_t>(&clover_selected_weapon));
+- bind("__CLOVER_STICKER_SET__",reinterpret_cast<std::uintptr_t>(&clover_sticker_set));
+- bind("__CLOVER_STICKER_GET__",reinterpret_cast<std::uintptr_t>(&clover_sticker_get));
+- bind("__CLOVER_SKY__",reinterpret_cast<std::uintptr_t>(&clover_sky));
+- bind("__CLOVER_SKY_TINT__",reinterpret_cast<std::uintptr_t>(&clover_sky_tint));
+- return script;
+-}
+-inline void bootstrap(SkeetSDK::CMenu* cs2_bootstrap_menu){if(attempted){
+- const unsigned last=heartbeat_at.load();const unsigned missed=heartbeat_gap.fetch_add(1)+1;
+- if(!loaded||!last||missed<=180||GetTickCount()-last<=5000)return;
+- // A minimized window may resume after minutes. Count rendered frames as
+- // well as time, so the first resumed frame never causes a false reload.
+- attempted=loaded=false;start=GetTickCount()-1500;heartbeat_gap.store(0);
+- }if(!start){start=GetTickCount();return;}if(GetTickCount()-start<1500)return;
++inline const char* bound_script(){return ui_addon_script;}
++inline void bootstrap(SkeetSDK::CMenu* cs2_bootstrap_menu){
++ if(attempted)return;
++ if(!start){start=GetTickCount();return;}if(GetTickCount()-start<1500)return;
+  auto* load=reinterpret_cast<unsigned char*>(0x43419b27u);MEMORY_BASIC_INFORMATION memory{};
+  if(!VirtualQuery(load,&memory,sizeof(memory))||memory.State!=MEM_COMMIT)return;
+  constexpr unsigned char signature[]={0x83,0xec,0x4c,0x53,0x55,0x33,0xc0};if(std::memcmp(load,signature,sizeof(signature)))return;
+@@ -96,11 +72,6 @@
+  const wchar_t* filename=L"clover_cs2_ui_8802.lua";std::wcscat(path,L"\\");std::wcscat(path,filename);
+  auto file=CreateFileW(path,GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);if(file==INVALID_HANDLE_VALUE)return;
+  const char* script=bound_script();DWORD wrote=0;const DWORD size=sizeof(ui_addon_script)-1;const bool ok=WriteFile(file,script,size,&wrote,nullptr)&&wrote==size;CloseHandle(file);if(!ok)return;
+- // The embedded, reviewed module needs FFI for this DLL's narrow exports.
+- // Scope the native loader permission to this load; preserve the user's flag.
+- bool* unsafe=nullptr;bool was_unsafe=false;auto* menu=cs2_bootstrap_menu;
+- if(menu&&menu->Tabs.size()==9&&menu->Tabs[SkeetSDK::CONFIG]&&menu->Tabs[SkeetSDK::CONFIG]->Childs.size()>1){auto* child=menu->Tabs[SkeetSDK::CONFIG]->Childs[1];if(child&&child->Elements.size()>1){auto* c=child->Elements[1]->GetAs<SkeetSDK::Checkbox>();wchar_t name[128]{};if(c&&c->Header.Type==SkeetSDK::UiCheckbox){native_ui_names::decode(c->Name.get(),name,128);if(!std::wcscmp(name,L"Allow unsafe scripts")&&c->Value){unsafe=reinterpret_cast<bool*>(c->Value);was_unsafe=*unsafe;*unsafe=true;}}}}
+- struct RestorePermission {bool* flag;bool old;~RestorePermission(){if(flag)*flag=old;}} restore{unsafe,was_unsafe};
+  modules.store(0);using Load=bool(__thiscall*)(const wchar_t*);loaded=reinterpret_cast<Load>(load)(L"clover_cs2_ui_8802");
+  if(!loaded)OutputDebugStringA("Clover: bundled World/Misc/sticker UI failed to load; see Lua errors.");
+ }
+@@ -114,3 +85,5 @@
+ __declspec(dllexport) int clover_sky(const char* name){return ui_addon::sky(name);}
+ __declspec(dllexport) int clover_sky_tint(const char* name,unsigned color){return ui_addon::sky_tint(name,color);}
+ }
++
++#include "ui_addon_mailbox.h"
+--- a/tests/addon_bootstrap_fixture.py
++++ b/tests/addon_bootstrap_fixture.py
+@@ -25,7 +25,7 @@
+  def loader(u,a,size,user):
+   if a!=0x43419b27:return
+   sp=u.reg_read(UC_X86_REG_ESP);assert wide(u,u.reg_read(UC_X86_REG_ECX))=='clover_cs2_ui_8802'
+-  assert bytes(u.mem_read(unsafe_value,1))==b'\1';loaded.append(True)
++  assert bytes(u.mem_read(unsafe_value,1))==b'\0';loaded.append(True)
+   u.reg_write(UC_X86_REG_EAX,1);u.reg_write(UC_X86_REG_EIP,word(u,sp));u.reg_write(UC_X86_REG_ESP,sp+4)
+  u.hook_add(UC_HOOK_CODE,loader)
+  call(u,exp('addon_reset_probe'));assert call(u,exp('addon_bootstrap_probe'),[menu])==0 and not writes
+@@ -35,6 +35,6 @@
+  assert call(u,exp('addon_bootstrap_probe'),[menu])==3 and len(writes)==1
+  call(u,exp('addon_heartbeat_probe'));ticks[0]=20000
+  for _ in range(180):assert call(u,exp('addon_bootstrap_probe'),[menu])==3 and len(writes)==1
+- assert call(u,exp('addon_bootstrap_probe'),[menu])==3 and len(writes)==2
++ assert call(u,exp('addon_bootstrap_probe'),[menu])==3 and len(writes)==1
+  assert bytes(u.mem_read(unsafe_value,1))==b'\0'
+- return {'passed':True,'warmup_delay_ms':1500,'exact_embedded_script_written_once':True,'native_loader_filename_abi':True,'reload_after_lua_unload_detected':True,'minimized_resume_does_not_reload_immediately':True,'loader_permission_scoped_and_restored':True,'filesystem_and_lua_loader_mocked':True,'game_tested':False}
++ return {'passed':True,'warmup_delay_ms':1500,'exact_embedded_script_written_once':True,'native_loader_filename_abi':True,'heartbeat_failure_does_not_reload':True,'minimized_resume_does_not_reload_immediately':True,'unsafe_script_permission_unchanged':True,'filesystem_and_lua_loader_mocked':True,'game_tested':False}
+--- a/tests/lua_ui_fixture.lua
++++ b/tests/lua_ui_fixture.lua
+@@ -14,6 +14,7 @@
+ function ui.get(r) if r.kind=='color' then return unpack(r.value) end return r.value end
+ function ui.set(r,...)
+  local args={...};if r.kind=='multi' or r.kind=='color' then r.value=args else r.value=args[1] end
++ if r.native_callback then r.native_callback(r) end
+  if r.callback then r.callback(r) end
+ end
+ function ui.update(r,...) r.options={...} end
+@@ -74,3 +75,33 @@
+ entity={get_local_player=function() return nil end,get_player_resource=function() return nil end,get_prop=function() return 75 end,get_player_name=function() return 'Enemy' end,is_enemy=function() return true end}
+ database={read=function(k) return db[k] end,write=function(k,v) db[k]=v end}
+ cvar=setmetatable({}, {__index=function(t,k) local v={value=k=='sv_skyname' and 'sky_map_default' or 'legacy_'..k};function v:get_string() return self.value end;function v:set_string(x) self.value=x end;rawset(t,k,v);return v end})
++
++-- Native UI mailbox fixture. FFI is deliberately completely unavailable.
++package.preload.ffi=function() error('FFI calls are forbidden in this fixture') end
++function fixture_connect_bridge()
++ local request=find('Clover bridge request 8802')
++ find('Clover bridge ready 8802').value=8802
++ request.native_callback=function()
++  local function arg(i) return find('Clover bridge in '..i).value end
++  local function put(i,v) find('Clover bridge out '..i).value=v end
++  local function fixed(v) return math.floor(v*10000+.00001) end
++  local function text()
++   local t={};for n=0,23 do local v=arg(7+n);for j=0,3 do local c=math.floor(v/128^j)%128;if c==0 then return table.concat(t) end;t[#t+1]=string.char(c) end end;return table.concat(t)
++  end
++  for i=0,6 do put(i,0) end
++  local op=arg(0);local result=1
++  if op==0 then result=8802
++  elseif op==1 then native.clover_ui_heartbeat()
++  elseif op==2 then native.clover_ui_module(arg(1))
++  elseif op==3 then native.clover_night(arg(1),arg(2),arg(3),arg(4))
++  elseif op==4 then native.clover_night_reset()
++  elseif op==5 then local t={};result=native.clover_telemetry(t,28);t=t[0];put(1,t.valid);put(2,fixed(t.cpu_percent));put(3,fixed(t.cpu_ghz));put(4,fixed(t.ram_used_gib));put(5,fixed(t.ram_total_gib));put(6,fixed(t.process_mib))
++  elseif op==6 then result=native.clover_selected_weapon()
++  elseif op==7 then result=native.clover_sticker_set(arg(1),arg(2),arg(3),arg(4)/10000,arg(5)/10000,arg(6)/10000)
++  elseif op==8 then local t={};result=native.clover_sticker_get(arg(1),arg(2),t);if result==1 then t=t[0];put(1,t.id);put(2,fixed(t.wear));put(3,fixed(t.scale));put(4,fixed(t.rotation)) end
++  elseif op==9 then result=native.clover_sky(text())
++  elseif op==10 then local name=text();result=native.clover_sky_tint(name~='' and name or nil,arg(1))
++  else result=0 end
++  put(0,result);put(7,arg(31))
++ end
++end
+--- a/tests/skin_menu_fixture.py
++++ b/tests/skin_menu_fixture.py
+@@ -152,6 +152,13 @@
+     # External name tag/config change updates existing view without reconstructing it.
+     store(u,textbox+0x64,4);u.mem_write(textbox+0x68,'Test\0'.encode('utf-16le'))
+     count=len(allocations);call(u,exp('skins_update_probe'));assert wide(u,out_text+0x68)=='Test';assert len(allocations)==count;cases+=1
++    # Native typing can change an inline buffer without firing its callback.
++    store(u,out_text+0x64,5);u.mem_write(out_text+0x68,'crown\0'.encode('utf-16le'))
++    call(u,exp('skins_update_probe'));assert wide(u,textbox+0x68)=='crown' and callbacks==[('value',textbox)];callbacks.clear();cases+=1
++    store(u,textbox+0x60,1);store(u,out_text+0x64,4);u.mem_write(out_text+0x68,'foil\0'.encode('utf-16le'))
++    call(u,exp('skins_update_probe'));assert wide(u,textbox+0x68)=='crown' and not callbacks
++    store(u,textbox+0x60,0);call(u,exp('skins_update_probe'));assert wide(u,textbox+0x68)=='foil' and callbacks==[('value',textbox)];callbacks.clear();cases+=1
++
+     # Weapon switches can rebind value pointers and replace contents in-place.
+     for n in range(8):
+         combo_vars([('Default',0),('Little Kev',42),('Getaway Sally',73),('Number K '+str(n),81)])
+--- /dev/null
++++ b/tests/test_ui_mailbox.cpp
+@@ -0,0 +1,59 @@
++// Production mailbox with mock SDK storage and native entry points, no game.
++#include <algorithm>
++#include <cassert>
++#include <cmath>
++#include <cstdint>
++#include <cstring>
++#include <cwchar>
++#include <memory>
++#include <string>
++#include <vector>
++#define __fastcall
++#include "../source/skeet/sticker_state.h"
++#include "../source/skeet/night_mode.h"
++namespace SkeetSDK {
++enum {UiCheckbox=3,UiSlider=5};
++struct Call {void* ecx;void(*function)(void*,void*);Call(void* p,decltype(function) f):ecx(p),function(f){}};
++struct Checkbox {struct {int Type;} Header;std::shared_ptr<std::wstring> Name;int* Value=nullptr;std::vector<Call> Calls;template<class T>T* GetAs(){return reinterpret_cast<T*>(this);}};
++using Slider=Checkbox;
++struct Child {std::vector<Checkbox*> Elements;};struct Tab{std::vector<Child*> Childs;};struct CMenu{std::vector<Tab*> Tabs;};
++}
++namespace native_ui_names {void decode(const std::wstring* name,wchar_t* out,unsigned n){std::wcsncpy(out,name->c_str(),n);out[n-1]=0;}}
++namespace ui_addon {struct Telemetry {unsigned size=28,valid=15;float cpu_percent=37,cpu_ghz=3.8f,ram_used_gib=5,ram_total_gib=16,process_mib=500;};}
++night_mode::State night;unsigned modules=0,beats=0;std::string sky_value;unsigned sky_color=0;
++void clover_ui_heartbeat(){++beats;}
++void clover_ui_module(unsigned mask){modules|=mask;}
++void clover_night(int on,unsigned amount,unsigned world,unsigned props){night.configure({on!=0,amount,world,props});}
++void clover_night_reset(){night.reset();}
++int clover_telemetry(void* out,unsigned){*static_cast<ui_addon::Telemetry*>(out)={};return 1;}
++int clover_selected_weapon(){return 9;}
++int clover_sticker_set(int w,unsigned slot,int id,float wear,float scale,float rot){return sticker_state::set(w,slot,{id,wear,scale,rot});}
++int clover_sticker_get(int w,unsigned slot,void* out){if(!sticker_state::gun(w)||slot>=4)return 0;*static_cast<sticker_state::Sticker*>(out)=sticker_state::weapons[w].slots[slot];return 1;}
++int clover_sky(const char* name){sky_value=name;return 1;}
++int clover_sky_tint(const char* name,unsigned color){sky_value=name?name:"";sky_color=color;return 1;}
++#include "../source/skeet/ui_addon_mailbox.h"
++int main(){
++ using namespace SkeetSDK;namespace box=ui_addon::mailbox;
++ CMenu menu;Tab tab;Child child;menu.Tabs.resize(9);menu.Tabs[8]=&tab;tab.Childs.push_back(&child);
++ Checkbox rows[42];int values[42]{};
++ for(int i=0;i<42;i++){rows[i].Header.Type=i?UiSlider:UiCheckbox;rows[i].Value=&values[i];std::wstring name=i==0?L"Clover bridge request 8802":i==1?L"Clover bridge ready 8802":i<34?L"Clover bridge in "+std::to_wstring(i-2):L"Clover bridge out "+std::to_wstring(i-34);rows[i].Name=std::make_shared<std::wstring>(name);child.Elements.push_back(&rows[i]);}
++ child.Elements.pop_back();box::frame(&menu);assert(!box::bound&&values[1]==0);
++ child.Elements.push_back(&rows[41]);box::frame(&menu);assert(box::bound&&values[1]==8802&&rows[0].Calls.size()==1);
++ auto run=[&](int op,std::initializer_list<int> args){static int seq=0;for(int i=1;i<7;i++)values[i+2]=0;int i=1;for(int a:args)values[2+i++]=a;values[2]=op;values[33]=++seq;for(auto c:rows[0].Calls)c.function(c.ecx,&rows[0]);assert(values[41]==seq);return values[34];};
++ assert(run(0,{})==8802);assert(run(1,{})==1&&beats==1);run(2,{15});assert(modules==15);
++ run(3,{1,85,0x735a50,0x917d73});assert(night.settings.enabled&&night.settings.amount==85&&night.settings.world==0x735a50);
++ run(3,{0,85,0x735a50,0x917d73});assert(!night.settings.enabled);run(4,{});assert(night.resetting);
++ assert(run(5,{})==1&&values[35]==15&&values[37]==38000);assert(run(6,{})==9);
++ const int id=sticker_catalog::kits[1].id;
++ for(int slot=0;slot<4;slot++){assert(run(7,{9,slot,id,3000,15000,-600000})==1);assert(run(8,{9,slot})==1&&values[35]==id&&values[36]==3000&&values[37]==15000&&values[38]==-600000);}
++ assert(run(7,{9,0,0,0,10000,0})==1);assert(run(8,{9,0})==1&&values[35]==0);
++ assert(run(7,{508,0,id,0,10000,0})==0);assert(run(8,{9,4})==0);assert(run(999,{})==0);
++ std::string name="sky_cs15_daylight04_hdr";
++ for(unsigned n=0;n<24;n++){unsigned v=0;for(unsigned j=0;j<4;j++)if(n*4+j<name.size())v|=unsigned(name[n*4+j])<<(j*7);values[2+7+n]=int(v);}
++ assert(run(9,{})==1&&sky_value==name);assert(run(10,{0xabcdef})==1&&sky_color==0xabcdef&&sky_value==name);
++ for(unsigned n=0;n<24;n++)values[2+7+n]=0;run(10,{0});assert(sky_value.empty());
++ box::frame(&menu);assert(rows[0].Calls.size()==1);
++ rows[0].Calls.clear();values[1]=0;box::frame(&menu);assert(rows[0].Calls.size()==1&&values[1]==8802);
++ assert(run(0,{})==8802);
++ child.Elements.clear();box::frame(&menu);assert(!box::bound);
++}
+--- /dev/null
++++ b/tests/ui_mailbox_fixture.py
+@@ -0,0 +1,38 @@
++"""Native x86 mailbox registration, real SDK Call vector dispatch, no Lua/FFI."""
++def check_mailbox(ns):
++ globals().update(ns)
++ u=fixture();pe,exp=load(u,'visuals_binding_probe.dll')
++ menu,tabs,tab,children,child,elements,values,callvec=[MEM+0x10000+i*0x1000 for i in range(8)]
++ store(u,menu+0x54,tabs);store(u,menu+0x58,tabs+36);store(u,tabs+32,tab)
++ store(u,tab+0x70,children);store(u,tab+0x74,children+4);store(u,children,child)
++ store(u,child+0x80,elements);store(u,child+0x84,elements+42*4)
++ rows=[]
++ for i in range(42):
++  at=MEM+0x30000+i*0x300;rows.append(at);store(u,elements+4*i,at);store(u,at+0x5c,values+4*i);u.mem_write(at+0x19,bytes([3 if i==0 else 5]))
++  name='Clover bridge request 8802' if i==0 else 'Clover bridge ready 8802' if i==1 else 'Clover bridge in '+str(i-2) if i<34 else 'Clover bridge out '+str(i-34)
++  encrypted=at+0x100;data=name.encode('utf-16le');store(u,at+0x38,encrypted);u.mem_write(encrypted,struct.pack('<HH',0,len(data))+data)
++ store(u,rows[0]+0x40,callvec);store(u,rows[0]+0x44,callvec);store(u,rows[0]+0x48,callvec+64)
++ call(u,exp('mailbox_frame_probe'),[menu]);assert word(u,values+4)==8802 and word(u,rows[0]+0x44)==callvec+8
++ sequence=[0]
++ def run(op,args=[]):
++  store(u,values+8,op)
++  for i in range(1,7):store(u,values+(i+2)*4,args[i-1] if i<=len(args) else 0)
++  sequence[0]+=1;store(u,values+33*4,sequence[0])
++  # Original Checkbox callback dispatcher executes the registered fastcall ABI.
++  call(u,0x4334e09f,[],rows[0])
++  assert word(u,values+41*4)==sequence[0]
++  return word(u,values+34*4)
++ assert run(0)==8802
++ assert run(3,[1,85,0x735a50,0x917d73])==1 and call(u,exp('mailbox_night_probe'))==85
++ assert run(3,[0,85,0x735a50,0x917d73])==1 and call(u,exp('mailbox_night_probe'))==0xffffffff
++ for slot in range(4):
++  assert run(7,[9,slot,6026,3000,15000,-600000])==1
++  assert run(8,[9,slot])==1 and word(u,values+35*4)==6026 and word(u,values+36*4)==3000 and word(u,values+37*4)==15000
++ assert run(7,[9,0,0,0,10000,0])==1 and run(8,[9,0])==1 and word(u,values+35*4)==0
++ assert run(7,[508,0,6026,0,10000,0])==0 and run(8,[9,4])==0
++ assert run(2,[15])==1
++ call(u,exp('mailbox_frame_probe'),[menu]);assert word(u,rows[0]+0x44)==callvec+8
++ store(u,rows[0]+0x44,callvec);store(u,values+4,0);call(u,exp('mailbox_frame_probe'),[menu]);assert word(u,rows[0]+0x44)==callvec+8 and word(u,values+4)==8802
++ assert run(0)==8802
++ store(u,child+0x84,elements);call(u,exp('mailbox_frame_probe'),[menu]);before=word(u,values+41*4);sequence[0]+=1;store(u,values+33*4,sequence[0]);call(u,0x4334e09f,[],rows[0]);assert word(u,values+41*4)==before
++ return {'passed':True,'native_x86_callback_abi':True,'ui_control_discovery':42,'night_mode_settings_through_real_callback':True,'four_sticker_slots_roundtrip':True,'none_and_invalid_inputs_checked':True,'rebind_after_callback_reset':True,'no_duplicate_callback':True,'retired_controls_disabled':True,'game_tested':False}
+--- a/tests/validate_lua_ui.py
++++ b/tests/validate_lua_ui.py
+@@ -7,9 +7,6 @@
+ lua.execute((ROOT/'tests/lua_ui_fixture.lua').read_text())
+ lua.globals().fixture_skin_group='Knife options'
+ source=(ROOT/'source/lua/clover_cs2_ui_8802.lua').read_text()
+-import re
+-for i,name in enumerate(re.findall(r'__CLOVER_[A-Z_]+__',source),1):
+-    address=0x1000+i*16;lua.globals().bridge_addresses[address]=name[2:-2].lower();source=source.replace(name,format(address,'x'))
+ # Exercise LuaJIT's real filename/module search. The previous native boundary
+ # stub accepted the wrong .lua suffix and therefore hid this exact failure.
+ folder=tempfile.TemporaryDirectory(prefix='clover-lua-resolution-')
+@@ -20,7 +17,7 @@
+ assert not ok and "module 'clover_cs2_ui_8802.lua' not found" in str(err)
+ lua.eval('require')('clover_cs2_ui_8802')
+ errors=lua.eval('errors');assert len(errors)==0,list(errors.values())
+-lua.execute('fire("paint_ui")');assert len(errors)==0,list(errors.values())
++lua.execute('assert(module_mask==0);fire("paint_ui");assert(module_mask==0);fixture_connect_bridge();fire("paint_ui")');assert len(errors)==0,list(errors.values())
+ lua.execute('''
+ assert(module_mask==15)
+ assert(find('Stickers').group=='Knife options' and find('Sticker slot').group=='Knife options')
+@@ -56,6 +53,7 @@
+ controls={};events={};draws={}
+ ''')
+ lua.execute(source)
++lua.execute('fixture_connect_bridge();fire("paint_ui")')
+ lua.execute("assert(ui.get(find('Override fog'))==true and ui.get(find('CS2 watermark'))==true);now=20;fire('paint_ui');assert(cvar.fog_override.value=='1')")
+-report={'passed':True,'lua_version':'LuaJIT 2.1','restricted_api_fixture':True,'modules_loaded_without_external_requires':True,'real_require_reproduces_old_suffix_failure':True,'real_require_loads_extensionless_module':True,'all_four_module_ready_bits_reported':True,'night_intensity_and_palette_bridge_called':True,'sticker_container_fallback_exercised':True,'legacy_world_conflicts_restored':True,'internal_ui_values_survive_lua_reload':True,'world_fog_clamps_end_after_start':True,'fog_and_lighting_restore_on_disable':True,'sky_restore_and_invalid_name_rejected':True,'sticker_search_bounded_choices':62,'four_slots_and_per_weapon_isolation':True,'none_removes_sticker':True,'per_weapon_config_serialization_by_sticker_id':True,'config_load_ignores_transient_filtered_combo_indices':True,'invalid_sticker_config_is_atomic_noop':True,'knives_hide_sticker_editor':True,'watermark_cpu_frequency_usage_and_ram_drawn':True,'uploaded_hit_log_rendered':True,'compiled_script_sha256':hashlib.sha256(source.encode()).hexdigest(),'game_tested':False}
++report={'passed':True,'lua_version':'LuaJIT 2.1','restricted_api_fixture':True,'ffi_entirely_unavailable':True,'startup_waits_for_native_mailbox':True,'native_ui_mailbox_transport':True,'modules_loaded_without_external_requires':True,'real_require_reproduces_old_suffix_failure':True,'real_require_loads_extensionless_module':True,'all_four_module_ready_bits_reported':True,'night_intensity_and_palette_bridge_called':True,'sticker_container_fallback_exercised':True,'legacy_world_conflicts_restored':True,'internal_ui_values_survive_lua_reload':True,'world_fog_clamps_end_after_start':True,'fog_and_lighting_restore_on_disable':True,'sky_restore_and_invalid_name_rejected':True,'sticker_search_bounded_choices':62,'four_slots_and_per_weapon_isolation':True,'none_removes_sticker':True,'per_weapon_config_serialization_by_sticker_id':True,'config_load_ignores_transient_filtered_combo_indices':True,'invalid_sticker_config_is_atomic_noop':True,'knives_hide_sticker_editor':True,'watermark_cpu_frequency_usage_and_ram_drawn':True,'uploaded_hit_log_rendered':True,'compiled_script_sha256':hashlib.sha256(source.encode()).hexdigest(),'game_tested':False}
+ (BUILD/'lua_ui_validation.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2))
+--- a/tests/validate_visuals.py
++++ b/tests/validate_visuals.py
+@@ -52,6 +52,8 @@
+                     left,right=cstring(dst),cstring(src);result=dst+left.index(right) if right in left else 0
+                 elif fn=='strcpy':u.mem_write(dst,cstring(src)+b'\0');result=dst
+                 else:left,right=cstring(dst),cstring(src);result=(left>right)-(left<right)
++        elif fn=='memcmp':
++            lhs,rhs,n=[word(u,sp+i) for i in [4,8,12]];a,b=bytes(u.mem_read(lhs,n)),bytes(u.mem_read(rhs,n));result=(a>b)-(a<b)
+         elif fn=='memset':
+             dst,value,n=[word(u,sp+i) for i in [4,8,12]];u.mem_write(dst,bytes([value&255])*n);result=dst
+         elif fn=='wcslen':
+@@ -92,6 +94,19 @@
+     report={'passed':True,**result,'source_sha256':hashlib.sha256((ROOT/'source/skeet/local_inventory_ui.h').read_bytes()).hexdigest(),'game_tested':False}
+     (BUILD/'inventory_ui_validation.json').write_text(json.dumps(report,indent=2)+'\n')
+     return report
++if '--mailbox-only' in sys.argv:
++    from ui_mailbox_fixture import check_mailbox
++    result=check_mailbox(globals());(BUILD/'ui_mailbox_validation.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2))
++    from addon_bootstrap_fixture import check_addon_bootstrap
++    result=check_addon_bootstrap(globals());(BUILD/'addon_bootstrap_validation.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2));raise SystemExit(0)
++if '--lifecycle-only' in sys.argv:
++    from visuals_lifecycle_fixture import check_lifecycle
++    result={'passed':True,'native_visuals_lifecycle_cases':check_lifecycle(globals()),'custom_sky_textbox_keeps_visuals_layout':True,'textbox_keyboard_input_and_config_roundtrip':True,'textbox_lock_respected':True,'game_tested':False}
++    (BUILD/'visuals_lifecycle_validation.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2));raise SystemExit(0)
++if '--skin-ui-only' in sys.argv:
++    from skin_menu_fixture import check_skin_menu
++    result={'passed':True,'skin_ui_cases':check_skin_menu(globals()),'sticker_search_text_input_polled':True,'source_text_lock_respected':True,'game_tested':False}
++    (BUILD/'skin_ui_text_validation.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2));raise SystemExit(0)
+ if '--skin-only' in sys.argv:
+     from skin_menu_fixture import check_skin_menu
+     cases=check_skin_menu(globals())
+--- a/tests/visuals_binding_probe.cpp
++++ b/tests/visuals_binding_probe.cpp
+@@ -233,3 +233,7 @@
+ __declspec(dllexport) void preview_binding_setup_probe(void* source,void* proxy,const wchar_t* name,const wchar_t* anchor){using namespace cs2_visuals;binding_count=1;auto& b=bindings[0];b={};b.source=static_cast<SkeetSDK::PElement>(source);b.proxy=static_cast<SkeetSDK::PElement>(proxy);b.group=&groups[0];groups[0].panel=EnemyESP;std::wcscpy(b.name,name);std::wcscpy(b.anchor,anchor);model(b,b.observed);captured_topology=topology();}
+ __declspec(dllexport) void preview_sync_probe(){cs2_visuals::sync();}
+ }
++
++extern "C" __declspec(dllexport) void mailbox_frame_probe(void* menu){ui_addon::mailbox::frame(static_cast<SkeetSDK::CMenu*>(menu));}
++extern "C" __declspec(dllexport) int mailbox_night_probe(){return night_mode_client::state.settings.enabled?int(night_mode_client::state.settings.amount):-1;}
++extern "C" __declspec(dllexport) void visuals_text_ctor_probe(unsigned ctor){cs2_visuals::native_text_ctor=reinterpret_cast<cs2_visuals::NativeTextCtor>(ctor);}
+--- a/tests/visuals_lifecycle_fixture.py
++++ b/tests/visuals_lifecycle_fixture.py
+@@ -13,7 +13,7 @@
+     store(u,menu+0x54,tabs);store(u,menu+0x58,tabs+36)
+     for i in range(9):store(u,tabs+4*i,MEM+0x30000+i*0x100)
+     store(u,tabs+3*4,visuals);store(u,tabs+4*4,misc)
+-    lua=word(u,tabs+8*4);store(u,lua+0x70,MEM+0x32000);store(u,lua+0x74,MEM+0x32008);store(u,MEM+0x32004,1)
++    lua=word(u,tabs+8*4);store(u,lua+0x70,MEM+0x32000);store(u,lua+0x74,MEM+0x32008);store(u,MEM+0x32004,MEM+0x32100)
+     vchildren=MEM+0x33000;store(u,visuals+0x70,vchildren);store(u,visuals+0x74,vchildren+52);store(u,visuals+0x78,vchildren+256)
+     store(u,vchildren,original);u.mem_write(original+0x15,b'\1')
+     def name(object,text):
+@@ -57,6 +57,8 @@
+             store(u,this,proxy_vt);store(u,this+0x10,parent);store(u,this+0x5c,value);u.mem_write(this+0x19,b'\3')
+             # Native constructors may initialize storage. create() must restore it.
+             u.mem_write(value,b'\0');created.append(this);result=this
++        elif a==api_base+0x580:
++            store(u,this,proxy_vt);store(u,this+0x10,word(u,sp+4));u.mem_write(this+0x19,b'\x0a');created.append(this);cleanup=8;result=this
+         elif a==api_base+0x220:
+             assert word(u,sp+4)==0;insert(this,word(u,sp+8));cleanup=12
+         elif a==api_base+0x420:
+@@ -79,6 +81,7 @@
+     for i in range(12):store(u,api+4*i,api_base+0x100+0x20*i)
+     call(u,exp('category_setup_probe'),[ctx,children,controls,api_base+0x460])
+     call(u,exp('lifecycle_setup_probe'),[api,api_base+0x560,api_base+0x480,api_base+0x540])
++    call(u,exp('visuals_text_ctor_probe'),[api_base+0x580])
+     assert call(u,exp('lifecycle_rebuild_probe'))==1
+     call(u,exp('choose_category_probe'),[1]);cases=0
+     def verify(items):
+@@ -135,9 +138,26 @@
+     frame();assert bytes(u.mem_read(word(u,controls+16)+0x15,1))==b'\0'
+     assert call(u,exp('lifecycle_status_probe'))==513
+     call(u,exp('choose_category_probe'),[1]);verify(1);cases+=1
++    # A World/custom-sky-style Lua textbox must not roll Visuals back to stock.
++    script=0x401000;u.mem_map(script,0x1000);source(script,0,'Script text',10)
++    def text(at,value):
++        store(u,at+0x64,len(value));u.mem_write(at+0x68,(value+'\0').encode('utf-16le'))
++    def get_text(at):return bytes(u.mem_read(at+0x68,word(u,at+0x64)*2)).decode('utf-16le')
++    text(script,'sky_custom');store(u,elements+4,script);store(u,original+0x84,elements+8)
++    frame();assert call(u,exp('lifecycle_status_probe'))==257
++    text_views=[]
++    for panel in [0,2]:
++        c=word(u,children+4*panel);entries=word(u,c+0x80);assert word(u,c+0x84)==entries+8
++        view=word(u,entries+4);assert get_text(view)=='sky_custom';text_views.append(view)
++    text(text_views[0],'sky_edited');frame();assert get_text(script)=='sky_edited' and get_text(text_views[1])=='sky_edited'
++    assert callbacks==[('value',script)];callbacks.clear()
++    text(script,'sky_config');frame();assert all(get_text(v)=='sky_config' for v in text_views) and not callbacks
++    store(u,script+0x60,1);text(text_views[0],'sky_locked');frame();assert get_text(script)=='sky_config'
++    store(u,script+0x60,0);frame();assert get_text(script)=='sky_locked';callbacks.clear()
++    store(u,original+0x84,elements+4);u.mem_unmap(script,0x1000);frame();verify(1);cases+=5
+     # Unsupported third-party controls retain the original interface safely;
+     # unloading that script recovers categories rather than disabling them forever.
+-    script=0x401000;u.mem_map(script,0x1000);source(script,0,'Unsupported',10)
++    script=0x401000;u.mem_map(script,0x1000);source(script,0,'Unsupported',6)
+     store(u,elements+4,script);store(u,original+0x84,elements+8)
+     frame();assert call(u,exp('lifecycle_status_probe'))==258
+     count=len(allocations);frame();assert len(allocations)==count
+--- a/tools/build_ui_addon.py
++++ b/tools/build_ui_addon.py
+@@ -21,16 +21,23 @@
+ """
+  watermark=watermark.replace("        if menu.has('Clock') or menu.has('Clock (24h)') then",insert+"        if menu.has('Clock') or menu.has('Clock (24h)') then")
+  watermark=watermark.replace("ffi.cdef[[", "pcall(ffi.cdef,[[").replace("]]\n\nlocal rawivengineclient", "]])\n\nlocal rawivengineclient")
++ # The built-in watermark also uses supported Lua APIs only.
++ watermark=watermark.replace("local ffi = require('ffi')\n", "")
++ a=watermark.index('pcall(ffi.cdef,[[');b=watermark.index('local watermark = {}',a)
++ watermark=watermark[:a]+watermark[b:]
++ a=watermark.index('    function watermark:get_server_address()');b=watermark.index('    function watermark:get_speed()',a)
++ watermark=watermark[:a]+"    function watermark:get_server_address() return nil end\n\n"+watermark[b:]
+  # Default selection is useful as soon as the user enables a new watermark.
+  watermark=watermark.replace('    update_elements(menu.watermark_elements)','    if #ui.get(menu.watermark_elements)==0 then ui.set(menu.watermark_elements,\'Logo\',\'Username\',\'FPS\',\'Ping\',\'Clock (24h)\',\'CPU frequency\',\'RAM\') end\n    update_elements(menu.watermark_elements)',1)
+  notify=notify.replace('    update_events(menu.events)',"    if #ui.get(menu.events)==0 then ui.set(menu.events,'Hit','Miss','Purchase') end\n    update_events(menu.events)",1)
+  meta=json.loads((ROOT/'data/sticker_catalog.json').read_text(encoding="utf-8"));kits=[[0,'None']]+[[k['id'],k['name']] for k in meta['kits']]
+  catalog='local CLOVER_LEGACY_STICKERS={'+','.join('{%d,%s}'%(i,json.dumps(n,ensure_ascii=False)) for i,n in kits)+'}\n'
+  # Separate closures avoid local-menu collisions between the uploaded scripts.
+- body=compat+'\n'+bridge+'\n'+catalog+'\n'
++ body=compat+'\n'+bridge+'\n'+catalog+'\nlocal function start_modules()\n'
+  for name,s in [('world',(F/'world.lua').read_text(encoding="utf-8")),('stickers',(F/'stickers.lua').read_text(encoding="utf-8")),('notifications',notify),('watermark',watermark)]:
+   mask={'world':1,'stickers':2,'notifications':4,'watermark':8}[name]
+   body+='\ndo\n local ok,err=pcall(function()\n'+s+'\n end)\n if ok then native.clover_ui_module('+str(mask)+') else client.error_log("Clover '+name+': "..tostring(err)) end\nend\n'
++ body+='\nend\nlocal modules_started=false\nclient.set_event_callback("paint_ui",function() if not modules_started and bridge_ready() then modules_started=true;start_modules() end end)\n'
+  script=F/'clover_cs2_ui_8802.lua';write(script,body)
+  # Raw string ASCII delimiter is checked before embedding, UTF-8 stays intact.
+  assert ')CLOVER8802"' not in body
